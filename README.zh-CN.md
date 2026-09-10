@@ -38,4 +38,4 @@ python -m app.main              # 启动程序
 
 ## 设计文档
 
-见 `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`。
+UI 主题方案见 `docs/design/theme-proposals.html`。
