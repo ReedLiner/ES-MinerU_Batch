@@ -66,7 +66,7 @@ app/
   ui/        Qt main window, settings dialog, task widgets, theme, worker threads
 tests/       pytest suite
 packaging/   PyInstaller spec, build script, Windows version info
-docs/        design spec, plan and UI theme proposals
+docs/        UI theme proposals
 ```
 
 Design notes: `docs/design/theme-proposals.html` (UI theme proposals).
