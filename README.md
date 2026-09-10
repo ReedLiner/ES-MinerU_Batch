@@ -69,7 +69,7 @@ packaging/   PyInstaller spec, build script, Windows version info
 docs/        design spec, plan and UI theme proposals
 ```
 
-Design document: `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`
+Design notes: `docs/design/theme-proposals.html` (UI theme proposals).
 
 ## Security notes
 
