@@ -52,6 +52,12 @@ class ConvertWorker(QThread):
             self._cancelled_ids.add(row_id)
         return True
 
+    def cancel_all(self) -> None:
+        """全部停止：放弃当前任务，并取消本批尚未开始的所有任务。"""
+        self._abandon = True
+        for row_id, _ in self._items:
+            self._cancelled_ids.add(row_id)
+
     # ---------- 内部 ----------
 
     def _report(self, rows: list[tuple[int, ConvertTask]], msg: str) -> None:
@@ -118,6 +124,11 @@ class ConvertWorker(QThread):
                     else:
                         ok += 1
                         self.task_finished.emit(row_id, True, str(task.output_md))
+                # 兜底：结果条数不足时也要收尾，避免有行一直停在"转换中"
+                if len(results) < len(rows):
+                    for row_id, _ in rows[len(results):]:
+                        fail += 1
+                        self.task_finished.emit(row_id, False, "未返回结果")
 
         for row_id, task in self._items:
             if row_id in self._cancelled_ids:

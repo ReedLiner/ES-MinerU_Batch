@@ -107,7 +107,7 @@ class MineruClient:
             self._retry(lambda: self._download(zip_url, tmp_zip), cancel_check)
             _extract_full_md(tmp_zip, out_md)
         finally:
-            tmp_zip.unlink(missing_ok=True)
+            _safe_unlink(tmp_zip)
 
     def _retry(self, op, cancel_check: CancelCheck | None = None):
         """仅对网络类错误做指数退避重试；业务错误（额度/鉴权等）立即抛出。"""
@@ -158,11 +158,19 @@ class MineruClient:
             Path(out_md).parent.mkdir(parents=True, exist_ok=True)
             sources.append(source)
 
-        batch_id, raw_urls = self._retry(
-            lambda: self._create_batch_many(sources), cancel_check
-        )
+        try:
+            batch_id, raw_urls = self._retry(
+                lambda: self._create_batch_many(sources), cancel_check
+            )
+        except MineruError as exc:
+            if exc.code == "CANCELLED":
+                raise
+            # 提交阶段被拒：此时尚未上传任何文件，可安全降级为逐个提交
+            raise MineruError(
+                str(exc), code="BATCH_REJECTED", friendly=friendly_message(exc)
+            ) from exc
         if len(raw_urls) < len(sources):
-            raise MineruError("申请到的上传链接数量不足")
+            raise MineruError("申请到的上传链接数量不足", code="BATCH_REJECTED")
         urls = [_require_https(u, "上传") for u in raw_urls[: len(sources)]]
 
         total = len(sources)
@@ -188,7 +196,7 @@ class MineruClient:
         for idx, (src, out_md) in enumerate(jobs):
             source = Path(src)
             out_md = Path(out_md)
-            rec = by_id.get(_data_id_for(source, idx))
+            rec = by_id.get(_data_id_for(idx))
             if rec is None and idx < len(records):
                 rec = records[idx]  # 兜底：按提交顺序
             if rec is None:
@@ -204,7 +212,7 @@ class MineruClient:
                     self._retry(lambda z=zip_url, t=tmp_zip: self._download(z, t), cancel_check)
                     _extract_full_md(tmp_zip, out_md)
                 finally:
-                    tmp_zip.unlink(missing_ok=True)
+                    _safe_unlink(tmp_zip)
             except MineruError as exc:
                 results.append((source, out_md, friendly_message(exc)))
             else:
@@ -214,9 +222,9 @@ class MineruClient:
     # ---------- 各步骤 ----------
 
     def _create_batch_many(self, sources: list[Path]) -> tuple[str, list[str]]:
-        # data_id 必须唯一（同名文件会重名），用于把结果精确配对回源文件
+        # data_id 用批内序号，保证唯一、短小，用于把结果精确配对回源文件
         files = [
-            {"name": s.name, "is_ocr": self._is_ocr, "data_id": _data_id_for(s, i)}
+            {"name": s.name, "is_ocr": self._is_ocr, "data_id": _data_id_for(i)}
             for i, s in enumerate(sources)
         ]
         # 批量任务统一走 vlm（HTML 不参与批量）
@@ -235,7 +243,8 @@ class MineruClient:
         return batch_id, urls
 
     def _create_batch(self, source: Path, page_ranges: str | None) -> tuple[str, str]:
-        files = [{"name": source.name, "is_ocr": self._is_ocr, "data_id": source.stem}]
+        # 同样不使用文件名作 data_id，避免长文件名触发 128 字符限制
+        files = [{"name": source.name, "is_ocr": self._is_ocr, "data_id": _data_id_for(0)}]
         if page_ranges:
             files[0]["page_ranges"] = page_ranges
         # 官方要求：HTML 文件必须使用 MinerU-HTML 模型
@@ -311,6 +320,10 @@ class MineruClient:
                 dest.write_bytes(resp.content)
         except requests.RequestException as exc:
             raise MineruError(f"下载结果失败：{exc}", code="NETWORK") from exc
+        except OSError as exc:
+            raise MineruError(
+                f"写入临时文件失败：{exc}（磁盘空间不足或目标路径不可写）"
+            ) from exc
 
     # ---------- HTTP 基础 ----------
 
@@ -359,9 +372,21 @@ def _records(data: dict) -> list[dict]:
     return records
 
 
-def _data_id_for(source: Path, index: int) -> str:
-    """批内唯一的 data_id（文件名可能重名，用下标区分）。"""
-    return f"{source.stem}_{index + 1}"
+def _data_id_for(index: int) -> str:
+    """批内唯一的 data_id。
+
+    不使用文件名：MinerU 限制 data_id ≤ 128 字符（中文按字节计），
+    长文件名会触发整批拒绝。改用固定短序号，长度可控且全 ASCII。
+    """
+    return f"f{index + 1}"
+
+
+def _safe_unlink(path: Path) -> None:
+    """删除临时文件；失败也不掩盖真正的错误（Windows 上常被占用）。"""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _require_https(url: Any, what: str) -> str:

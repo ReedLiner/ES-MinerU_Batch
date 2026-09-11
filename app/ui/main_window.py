@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self._rows_by_id: dict[int, TaskRow] = {}
         self._worker: ConvertWorker | None = None
         self._next_id = 0
+        self._stopped = False
         self._initial_paths = list(initial_paths or [])
 
         root = QWidget()
@@ -91,6 +92,11 @@ class MainWindow(QMainWindow):
         self.summary.setObjectName("subtle")
         bottom.addWidget(self.summary)
         bottom.addStretch(1)
+        self.stop_btn = QPushButton("全部停止")
+        self.stop_btn.setToolTip("中断当前转换，并取消所有尚未开始的任务")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop_all)
+        bottom.addWidget(self.stop_btn)
         clear_btn = QPushButton("清空已完成")
         clear_btn.clicked.connect(self._clear_finished)
         bottom.addWidget(clear_btn)
@@ -158,6 +164,7 @@ class MainWindow(QMainWindow):
         if skipped:
             self.summary.setText(f"已跳过 {len(skipped)} 个不支持的文件")
         if fresh:
+            self._stopped = False  # 有新任务进来，解除"已停止"状态
             if self._worker is not None:
                 # 队列运行中加入的新任务也纳入总进度
                 self.overall.setMaximum(self.overall.maximum() + len(fresh))
@@ -180,6 +187,7 @@ class MainWindow(QMainWindow):
             self._open_settings()
             key = load_key()
             if not key:
+                self.summary.setText("未设置 API Key，任务未开始（点「⚙ 设置」填写）")
                 return
         self.overall.setMaximum(len(pending))
         self.overall.setValue(0)
@@ -197,7 +205,28 @@ class MainWindow(QMainWindow):
         worker.task_cancelled.connect(self._on_task_cancelled)
         worker.all_done.connect(self._on_all_done)
         self._worker = worker
+        self.stop_btn.setEnabled(True)
         worker.start()
+
+    def _stop_all(self) -> None:
+        """全部停止：中断当前转换，其余排队任务一律不再提交。"""
+        worker = self._worker
+        if worker is None:
+            for row in self._rows:
+                if row.status == "排队中":
+                    row.set_cancelled(NOT_SUBMITTED_MSG)
+            self.summary.setText("已停止：没有正在进行的转换")
+            return
+        self._stopped = True
+        self.stop_btn.setEnabled(False)
+        worker.cancel_all()
+        # 排队中的行立即标记取消（含运行中新加入、还不归 worker 管的），
+        # 正在转换的那一行交给 worker 的信号收尾
+        for row in self._rows:
+            if row.status == "排队中":
+                worker.cancel(row.row_id)
+                row.set_cancelled(NOT_SUBMITTED_MSG)
+        self.summary.setText("正在停止…（当前任务会中断，其余排队任务不再提交）")
 
     def _on_row_cancel(self, row_id: int) -> None:
         row = self._row_by_id(row_id)
@@ -245,12 +274,16 @@ class MainWindow(QMainWindow):
         if cancelled:
             parts.append(f"取消 {cancelled} 个")
         text = "全部完成：" + "，".join(parts)
+        if self._stopped:
+            text = "已停止：" + "，".join(parts)
         self.summary.setText(text)
         self._worker = None
+        self.stop_btn.setEnabled(False)
         if ok and load_settings()["auto_open"]:
             self._auto_open_last_output()
         self._notify("ES MinerU Batch", text)
-        self._start_worker()  # 续跑：转换期间新加入的排队任务自动开始
+        if not self._stopped:
+            self._start_worker()  # 续跑：转换期间新加入的排队任务自动开始
 
     # ---------- 打开输出 / 通知 ----------
 
@@ -295,6 +328,8 @@ class MainWindow(QMainWindow):
             self._tray.setVisible(False)
         except RuntimeError:
             pass
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.cancel_all()
         worker = self._worker
         if worker is not None and worker.isRunning():
             ret = QMessageBox.question(

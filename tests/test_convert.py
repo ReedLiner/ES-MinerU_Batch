@@ -52,6 +52,27 @@ class FakeClient:
         out_md.write_text(f"content-{page_ranges or 'full'}", encoding="utf-8")
 
 
+class RejectingBatchClient(FakeClient):
+    """提交阶段被拒（未上传任何文件），单文件转换正常。"""
+
+    def __init__(self):
+        super().__init__()
+        self.batch_calls = 0
+
+    def convert_batch(self, jobs, progress=None, cancel_check=None):
+        self.batch_calls += 1
+        raise MineruError(
+            'field "files.data_id" cannot exceed 128 characters', code="BATCH_REJECTED"
+        )
+
+
+class UploadFailClient(FakeClient):
+    """已进入上传阶段后失败：不能降级重试，否则会重复提交、重复扣额度。"""
+
+    def convert_batch(self, jobs, progress=None, cancel_check=None):
+        raise MineruError("上传失败：连接中断", code="NETWORK")
+
+
 class FlakyClient(FakeClient):
     """前 N 次调用抛“临时故障”，用于验证分段重试。"""
 
@@ -180,6 +201,27 @@ def test_convert_many_splits_batches(tmp_path):
     convert_many(client, jobs)
     assert [len(b) for b in client.batches] == [50, 1]
     assert (tmp_path / "50.md").exists()
+
+
+def test_convert_many_falls_back_to_single_when_batch_rejected(tmp_path):
+    """整批被拒（如某文件名超长）时，自动改为逐个转换，不连累同批其它文件。"""
+    a = tmp_path / "a.docx"; a.write_bytes(b"x")
+    b = tmp_path / "b.docx"; b.write_bytes(b"x")
+    client = RejectingBatchClient()
+    results = convert_many(client, [(a, tmp_path / "a.md"), (b, tmp_path / "b.md")])
+    assert client.batch_calls == 1
+    assert len(client.calls) == 2  # 已降级为逐个转换
+    assert [e for _, _, e in results] == [None, None]
+    assert (tmp_path / "a.md").exists() and (tmp_path / "b.md").exists()
+
+
+def test_convert_many_does_not_fall_back_after_upload(tmp_path):
+    """上传阶段之后的失败不应再逐个重试，避免同一文件被提交两次。"""
+    a = tmp_path / "a.docx"; a.write_bytes(b"x")
+    client = UploadFailClient()
+    with pytest.raises(MineruError):
+        convert_many(client, [(a, tmp_path / "a.md")])
+    assert client.calls == []  # 没有重复提交
 
 
 def test_empty_part_is_reconverted(tmp_path):

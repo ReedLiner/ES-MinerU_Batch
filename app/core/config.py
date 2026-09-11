@@ -139,7 +139,16 @@ def save_key(key: str) -> None:
 
 
 def clear_key() -> None:
-    CONFIG_PATH.unlink(missing_ok=True)
+    """删除已保存的 Key，但保留转换设置等其它配置。"""
+    data = _read_config()
+    if not data:
+        return
+    data.pop(KEY_FIELD, None)
+    data.pop(KEY_ENC_FIELD, None)
+    if data:
+        _write_config(data)
+    else:
+        CONFIG_PATH.unlink(missing_ok=True)
 
 
 def load_settings() -> dict:

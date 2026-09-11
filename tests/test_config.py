@@ -58,6 +58,15 @@ def test_clear_key(cfg_path):
     assert config.load_key() is None
 
 
+def test_clear_key_keeps_settings(cfg_path):
+    config.save_settings({"is_ocr": True, "language": "en"})
+    config.save_key("sk-abc")
+    config.clear_key()
+    assert config.load_key() is None
+    assert config.load_settings()["is_ocr"] is True
+    assert config.load_settings()["language"] == "en"
+
+
 def test_masked():
     assert config.masked("sk-abcdefghij") == "sk-a****"
     assert config.masked("abcd") == "****"

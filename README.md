@@ -13,7 +13,8 @@ Drag PDF / Word / PPT / Excel / image / HTML files into the window and get clean
 - **8 document languages**: Chinese (simplified) / English / Traditional Chinese / Japanese / Korean / Latin / Cyrillic / Arabic.
 - **Flexible output**: next to the source file by default; for a folder, a sibling `FolderName (MinerU)` folder is created; or pick one fixed output directory.
 - **Duplicate handling**: optionally auto-number colliding outputs (`a.md`, `a(1).md`) instead of overwriting.
-- **Task control**: cancel a *Queued* task before it is submitted (no quota consumed); abandon a *Converting* task (already submitted segments may still complete on the server side and consume quota).
+- **Task control**: cancel a *Queued* task before it is submitted (no quota consumed); abandon a *Converting* task (already submitted segments may still complete on the server side and consume quota). **Stop all** (bottom right) halts the current conversion and stops submitting every remaining queued task.
+- **Long file names**: MinerU rejects names over 128 characters. The app then falls back to one-by-one conversion so only that file fails, with a "please shorten the file name" hint.
 - **Quick access**: per-row **Open** button, double-click a row to open its output folder, desktop notification when everything finishes, and an optional auto-open of the output folder.
 - **Command line**: `ES MinerU Batch.exe a.pdf D:\Docs`.
 - **Privacy**: the API key is stored per-user and encrypted with Windows DPAPI; it is never written to the log.

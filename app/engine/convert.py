@@ -11,7 +11,7 @@ from typing import Callable
 
 from app.core.config import MAX_BATCH_FILES
 from app.engine.client import HTML_EXTS, MineruClient, ProgressCb
-from app.engine.errors import MineruError
+from app.engine.errors import MineruError, friendly_message
 
 CHUNK_SIZE = 200  # MinerU 单次任务页数上限
 _RETRY_CODES = ("NETWORK", "TIMEOUT", "-60006")  # 分段失败后值得重试的错误
@@ -86,11 +86,37 @@ def convert_many(
     jobs = [(Path(s), Path(o)) for s, o in jobs]
     results: list[tuple[Path, Path, str | None]] = []
     for i in range(0, len(jobs), MAX_BATCH_FILES):
-        results.extend(
-            client.convert_batch(
-                jobs[i : i + MAX_BATCH_FILES], progress=progress, cancel_check=cancel_check
+        chunk = jobs[i : i + MAX_BATCH_FILES]
+        try:
+            results.extend(
+                client.convert_batch(chunk, progress=progress, cancel_check=cancel_check)
             )
-        )
+        except MineruError as exc:
+            # 仅在"提交阶段被拒"时降级（此时还没上传任何文件，不会重复扣额度）；
+            # 已进入上传/轮询后的失败必须原样抛出，避免同一文件被提交两次
+            if exc.code != "BATCH_REJECTED":
+                raise
+            _report(progress, f"批量提交失败：{exc}；改为逐个转换…")
+            results.extend(_convert_one_by_one(client, chunk, progress, cancel_check))
+    return results
+
+
+def _convert_one_by_one(
+    client: MineruClient,
+    jobs: list[tuple[Path, Path]],
+    progress: ProgressCb | None,
+    cancel_check: Callable[[], bool] | None,
+) -> list[tuple[Path, Path, str | None]]:
+    results: list[tuple[Path, Path, str | None]] = []
+    for src, out_md in jobs:
+        try:
+            convert_file(src, out_md, client, progress=progress, cancel_check=cancel_check)
+        except MineruError as exc:
+            results.append((src, out_md, friendly_message(exc)))
+        except Exception as exc:  # 兜底
+            results.append((src, out_md, f"未预期错误：{exc}"))
+        else:
+            results.append((src, out_md, None))
     return results
 
 

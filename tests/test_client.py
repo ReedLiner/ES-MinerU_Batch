@@ -90,7 +90,7 @@ def test_convert_happy_path(tmp_path, monkeypatch):
     assert out_md.read_bytes() == b"# hello"
     assert s.posts[0]["url"] == "https://api.test/v4/file-urls/batch"
     assert s.posts[0]["json"]["files"][0]["name"] == "报告.pdf"
-    assert s.posts[0]["json"]["files"][0]["data_id"] == "报告"
+    assert s.posts[0]["json"]["files"][0]["data_id"] == "f1"  # 不使用文件名（避免超 128 字符）
     assert s.puts == [("https://up/1", b"pdf-bytes")]
     assert s.gets[0].endswith("/extract-results/batch/b1")
 
@@ -312,8 +312,8 @@ def test_convert_batch_failed_record_is_per_file(tmp_path):
         "batch_id": "b1", "file_urls": ["https://up/1", "https://up/2"]}})]
     s.get_responses = [
         FakeResp(body={"data": {"extract_result": [
-            {"state": "done", "full_zip_url": "https://z/1", "data_id": "a_1"},
-            {"state": "failed", "err_msg": "nope", "data_id": "b_2"},
+            {"state": "done", "full_zip_url": "https://z/1", "data_id": "f1"},
+            {"state": "failed", "err_msg": "nope", "data_id": "f2"},
         ]}}),
         FakeResp(content=_make_zip(tmp_path / "z1", {"full.md": b"AAA"})),
     ]
@@ -334,8 +334,8 @@ def test_convert_batch_unique_data_ids(tmp_path):
         "batch_id": "b1", "file_urls": ["https://up/1", "https://up/2"]}})]
     s.get_responses = [
         FakeResp(body={"data": {"extract_result": [
-            {"state": "done", "full_zip_url": "https://z/1", "data_id": "同名_1"},
-            {"state": "done", "full_zip_url": "https://z/2", "data_id": "同名_2"},
+            {"state": "done", "full_zip_url": "https://z/1", "data_id": "f1"},
+            {"state": "done", "full_zip_url": "https://z/2", "data_id": "f2"},
         ]}}),
         FakeResp(content=_make_zip(tmp_path / "z1", {"full.md": b"AAA"})),
         FakeResp(content=_make_zip(tmp_path / "z2", {"full.md": b"BBB"})),
@@ -364,15 +364,33 @@ def test_convert_batch_matches_records_by_data_id(tmp_path, monkeypatch):
     def fake_get(url, **kwargs):
         if url.endswith("/b1"):  # 轮询：故意把 b 的记录放在前面
             return FakeResp(body={"data": {"extract_result": [
-                {"state": "done", "full_zip_url": "https://z/2", "data_id": "b_2"},
-                {"state": "done", "full_zip_url": "https://z/1", "data_id": "a_1"},
-            ]}})
+                {"state": "done", "full_zip_url": "https://z/2", "data_id": "f2"},
+                {"state": "done", "full_zip_url": "https://z/1", "data_id": "f1"},
+                ]}})
         return FakeResp(content=zips[url])
 
     monkeypatch.setattr(s, "get", fake_get)
     _client(s).convert_batch([(a, tmp_path / "a.md"), (b, tmp_path / "b.md")])
     assert (tmp_path / "a.md").read_bytes() == b"AAA"
     assert (tmp_path / "b.md").read_bytes() == b"BBB"
+
+
+def test_data_id_is_short_and_ascii(tmp_path):
+    """中文长文件名也不能让 data_id 触到 MinerU 的 128 字符上限。"""
+    long_name = tmp_path / (("超长文件名" * 20) + ".pdf")
+    long_name.write_bytes(b"x")
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {
+        "batch_id": "b1", "file_urls": ["https://up/1"]}})]
+    s.get_responses = [
+        FakeResp(body={"data": {"extract_result": [
+            {"state": "done", "full_zip_url": "https://z/1", "data_id": "f1"}]}}),
+        FakeResp(content=_make_zip(tmp_path / "z1", {"full.md": b"AAA"})),
+    ]
+    _client(s).convert_batch([(long_name, tmp_path / "o.md")])
+    ids = [f["data_id"] for f in s.posts[0]["json"]["files"]]
+    assert ids == ["f1"]
+    assert all(len(i) <= 8 and i.isascii() for i in ids)
 
 
 def test_convert_batch_size_limit(tmp_path):
@@ -430,6 +448,21 @@ def test_create_batch_retry_gives_up(tmp_path, monkeypatch):
         _client(s).convert(src, tmp_path / "o.md")
     assert ei.value.code == "NETWORK"
     assert calls["n"] == client_mod._RETRY_TIMES + 1
+
+
+def test_download_write_failure_becomes_mineru_error(tmp_path):
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    (tmp_path / "o.zip.tmp").mkdir()  # 占位目录，让临时文件写入失败
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {
+        "batch_id": "b", "file_urls": ["https://up/1"]}})]
+    s.get_responses = [
+        FakeResp(body={"data": {"extract_result": [
+            {"state": "done", "full_zip_url": "https://z/1"}]}}),
+        FakeResp(content=_make_zip(tmp_path / "z", {"full.md": b"AAA"})),
+    ]
+    with pytest.raises(MineruError, match="写入临时文件失败"):
+        _client(s).convert(src, tmp_path / "o.md")
 
 
 def test_html_file_uses_mineru_html_model(tmp_path):

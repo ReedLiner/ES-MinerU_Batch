@@ -19,6 +19,11 @@ def test_unknown_code_falls_back_to_raw():
     assert friendly_message(exc) == "原始错误"
 
 
+def test_validation_error_friendly():
+    msg = friendly_message(MineruError("x", code="-10002"))
+    assert "文件名" in msg
+
+
 def test_cancelled_friendly():
     msg = friendly_message(MineruError("x", code="CANCELLED"))
     assert "取消" in msg
