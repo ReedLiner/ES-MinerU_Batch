@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -14,7 +16,7 @@ from typing import Any, Callable
 import requests
 
 from app.core.config import MAX_BATCH_FILES
-from app.engine.errors import MineruError, friendly_message
+from app.engine.errors import MineruError, friendly_message, redact
 
 API_BASE = "https://mineru.net/api/v4"
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB（MinerU 在线上限）
@@ -22,8 +24,12 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB（MinerU 在线上限）
 _POLL_INITIAL = 2.0
 _POLL_MAX = 15.0
 _UPLOAD_CHUNK = 8 * 1024 * 1024
-_RETRY_TIMES = 2        # 网络类失败额外重试次数
-_RETRY_INITIAL = 1.0    # 退避起始秒数
+_RETRY_TIMES = 2             # 网络类失败额外重试次数
+_RETRY_TIMES_RATE = 4        # 限流（429）额外重试次数更多
+_RETRY_INITIAL = 1.0         # 退避起始秒数
+_RETRY_CAP = 30.0            # 单次退避上限
+_RETRYABLE = {"NETWORK", "RATE_LIMIT", "HTTP_5XX"}
+_POLL_FAIL_TOLERANCE = 3     # 轮询期连续网络失败达到该次数才判失败
 
 _SLEEP = time.sleep  # 测试可替换
 
@@ -110,22 +116,27 @@ class MineruClient:
             _safe_unlink(tmp_zip)
 
     def _retry(self, op, cancel_check: CancelCheck | None = None):
-        """仅对网络类错误做指数退避重试；业务错误（额度/鉴权等）立即抛出。"""
+        """对网络/限流/5xx 做指数退避重试；业务错误（额度/鉴权等）立即抛出。
+
+        429 优先按服务端 Retry-After 头等待。
+        """
         delay = _RETRY_INITIAL
-        last: MineruError | None = None
-        for attempt in range(_RETRY_TIMES + 1):
+        attempt = 0
+        while True:
             if cancel_check and cancel_check():
                 raise MineruError("已取消该任务", code="CANCELLED")
             try:
                 return op()
             except MineruError as exc:
-                if exc.code != "NETWORK":
+                if exc.code not in _RETRYABLE:
                     raise
-                last = exc
-                if attempt < _RETRY_TIMES:
-                    _SLEEP(delay)
-                    delay *= 2
-        raise last
+                max_extra = _RETRY_TIMES_RATE if exc.code == "RATE_LIMIT" else _RETRY_TIMES
+                if attempt >= max_extra:
+                    raise
+                base = getattr(exc, "retry_after", None) or delay
+                _SLEEP(min(base, _RETRY_CAP))
+                delay = min(delay * 2, _RETRY_CAP)
+                attempt += 1
 
     def convert_batch(
         self,
@@ -163,11 +174,11 @@ class MineruClient:
                 lambda: self._create_batch_many(sources), cancel_check
             )
         except MineruError as exc:
-            if exc.code == "CANCELLED":
-                raise
-            # 提交阶段被拒：此时尚未上传任何文件，可安全降级为逐个提交
+            if exc.code in ("CANCELLED", "RATE_LIMIT", "HTTP_5XX"):
+                raise  # 限流/服务错误由 _retry 整批退避重试，绝不降级放大请求量
+            # 提交阶段被业务性拒绝（如文件名超长）：此时尚未上传任何文件，可安全降级为逐个提交
             raise MineruError(
-                str(exc), code="BATCH_REJECTED", friendly=friendly_message(exc)
+                redact(str(exc)), code="BATCH_REJECTED", friendly=friendly_message(exc)
             ) from exc
         if len(raw_urls) < len(sources):
             raise MineruError("申请到的上传链接数量不足", code="BATCH_REJECTED")
@@ -239,7 +250,7 @@ class MineruClient:
         batch_id = data.get("batch_id")
         urls = data.get("file_urls") or []
         if not batch_id or not urls:
-            raise MineruError(f"申请上传链接失败: {body}")
+            raise MineruError(f"申请上传链接失败: {redact(str(body))}")
         return batch_id, urls
 
     def _create_batch(self, source: Path, page_ranges: str | None) -> tuple[str, str]:
@@ -260,7 +271,7 @@ class MineruClient:
         batch_id = data.get("batch_id")
         urls = data.get("file_urls") or []
         if not batch_id or not urls:
-            raise MineruError(f"申请上传链接失败: {body}")
+            raise MineruError(f"申请上传链接失败: {redact(str(body))}")
         return batch_id, urls[0]
 
     def _upload(self, url: str, source: Path) -> None:
@@ -271,13 +282,28 @@ class MineruClient:
 
         try:
             resp = self._session.put(url, data=_stream(), timeout=300)
-        except (requests.RequestException, OSError) as exc:
-            # OSError：文件被占用/被删除等本地读取失败
+        except requests.RequestException as exc:
             raise MineruError(
-                f"上传失败：{exc}",
-                code="NETWORK",
-                friendly=f"读取或上传文件失败：{exc}。文件可能被其他程序占用，请关闭后重试。",
+                f"上传失败：{redact(str(exc))}", code="NETWORK",
+                friendly=f"上传文件失败（网络）：{redact(str(exc))}",
             ) from exc
+        except PermissionError as exc:
+            raise MineruError(
+                f"本地文件无法读取：{exc}",
+                code="LOCAL_ERROR",
+                friendly=f"文件无法读取：{source.name}（无权限或被其他程序占用），请检查后重试。",
+            ) from exc
+        except OSError as exc:
+            # 文件被占用/被删除等本地读取失败：不是网络问题，不进入网络重试
+            raise MineruError(
+                f"读取文件失败：{exc}",
+                code="LOCAL_ERROR",
+                friendly=f"读取文件失败：{source.name}（{exc}）",
+            ) from exc
+        if resp.status_code == 429:
+            raise _rate_limit_error(resp, "上传")
+        if resp.status_code >= 500:
+            raise MineruError(f"上传失败 HTTP {resp.status_code}", code="HTTP_5XX")
         if resp.status_code >= 400:
             raise MineruError(f"上传失败 HTTP {resp.status_code}")
 
@@ -290,10 +316,22 @@ class MineruClient:
         """轮询结果。fail_fast=True 时任一失败立即报错；批量场景传 False，等全部终态后逐个判定。"""
         started = time.time()
         delay = _POLL_INITIAL
+        net_failures = 0
         while True:
             if cancel_check and cancel_check():
                 raise MineruError("已放弃等待该任务", code="CANCELLED")
-            body = self._get(f"/extract-results/batch/{batch_id}")
+            try:
+                body = self._get(f"/extract-results/batch/{batch_id}")
+            except MineruError as exc:
+                # H1：轮询期瞬断不等同任务失败，连续多次才放弃
+                if exc.code not in _RETRYABLE:
+                    raise
+                net_failures += 1
+                if net_failures >= _POLL_FAIL_TOLERANCE:
+                    raise
+                _SLEEP(min(delay, _POLL_MAX))
+                continue
+            net_failures = 0
             data = body.get("data") or {}
             records = _records(data)
             states = [r.get("state") for r in records]
@@ -315,11 +353,17 @@ class MineruClient:
     def _download(self, url: str, dest: Path) -> None:
         try:
             with self._session.get(url, timeout=300) as resp:
+                if resp.status_code == 429:
+                    raise _rate_limit_error(resp, "下载")
+                if resp.status_code >= 500:
+                    raise MineruError(f"下载结果失败 HTTP {resp.status_code}", code="HTTP_5XX")
                 if resp.status_code >= 400:
                     raise MineruError(f"下载结果失败 HTTP {resp.status_code}")
                 dest.write_bytes(resp.content)
         except requests.RequestException as exc:
-            raise MineruError(f"下载结果失败：{exc}", code="NETWORK") from exc
+            raise MineruError(
+                f"下载结果失败：{redact(str(exc))}", code="NETWORK"
+            ) from exc
         except OSError as exc:
             raise MineruError(
                 f"写入临时文件失败：{exc}（磁盘空间不足或目标路径不可写）"
@@ -333,14 +377,14 @@ class MineruClient:
                 self._base + path, headers=self._headers(), json=payload, timeout=60
             )
         except requests.RequestException as exc:
-            raise MineruError(f"网络请求失败：{exc}", code="NETWORK") from exc
+            raise MineruError(f"网络请求失败：{redact(str(exc))}", code="NETWORK") from exc
         return self._check(resp)
 
     def _get(self, path: str) -> dict:
         try:
             resp = self._session.get(self._base + path, headers=self._headers(), timeout=60)
         except requests.RequestException as exc:
-            raise MineruError(f"网络请求失败：{exc}", code="NETWORK") from exc
+            raise MineruError(f"网络请求失败：{redact(str(exc))}", code="NETWORK") from exc
         return self._check(resp)
 
     def _headers(self) -> dict[str, str]:
@@ -356,11 +400,20 @@ class MineruClient:
             code = body.get("code")
             if code not in (0, "0", None, ""):
                 msg = body.get("msg") or body.get("message") or ""
-                raise MineruError(f"MinerU 错误 code={code}：{msg}", code=str(code))
+                raise MineruError(
+                    f"MinerU 错误 code={code}：{redact(str(msg))}", code=str(code)
+                )
             return body
         if resp.status_code in (401, 403):
             raise MineruError(f"鉴权失败 (HTTP {resp.status_code})", code=str(resp.status_code))
-        raise MineruError(f"MinerU HTTP {resp.status_code}：{resp.text[:200]}")
+        if resp.status_code == 429:
+            raise _rate_limit_error(resp, "请求")
+        if resp.status_code >= 500:
+            raise MineruError(
+                f"MinerU 服务错误 HTTP {resp.status_code}：{redact(resp.text[:200])}",
+                code="HTTP_5XX",
+            )
+        raise MineruError(f"MinerU HTTP {resp.status_code}：{redact(resp.text[:200])}")
 
 
 # ---------- 模块级辅助 ----------
@@ -381,6 +434,15 @@ def _data_id_for(index: int) -> str:
     return f"f{index + 1}"
 
 
+def _rate_limit_error(resp, what: str) -> MineruError:
+    exc = MineruError(f"{what}触发限流（HTTP 429）", code="RATE_LIMIT")
+    try:
+        exc.retry_after = max(1.0, float(resp.headers.get("Retry-After")))
+    except (TypeError, ValueError):
+        exc.retry_after = None
+    return exc
+
+
 def _safe_unlink(path: Path) -> None:
     """删除临时文件；失败也不掩盖真正的错误（Windows 上常被占用）。"""
     try:
@@ -397,6 +459,8 @@ def _require_https(url: Any, what: str) -> str:
 
 
 def _extract_full_md(zip_path: Path, out_md: Path) -> None:
+    """原子写出 md：先写 .tmp 再 os.replace，崩溃不会留截断成品。"""
+    tmp = out_md.with_name(out_md.name + ".tmp")
     try:
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
@@ -405,11 +469,13 @@ def _extract_full_md(zip_path: Path, out_md: Path) -> None:
                 raise MineruError(
                     f"结果包中没有 Markdown，包含：{names[:10]}{'...' if len(names) > 10 else ''}"
                 )
-            with zf.open(candidates[0]) as src, out_md.open("wb") as dst:
-                dst.write(src.read())
+            with zf.open(candidates[0]) as src, tmp.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+        os.replace(tmp, out_md)
     except zipfile.BadZipFile as exc:
         raise MineruError(f"结果包损坏：{exc}") from exc
     except OSError as exc:
+        _safe_unlink(tmp)
         raise MineruError(f"写入 Markdown 失败：{exc}（目标路径不可写或磁盘已满）") from exc
 
 

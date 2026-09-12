@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl
@@ -34,7 +35,8 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_paths: list[Path] | None = None):
         super().__init__()
         self.setWindowTitle("ES MinerU Batch")
-        self.setFixedSize(760, 600)
+        self.resize(760, 600)             # 默认尺寸
+        self.setMinimumSize(660, 520)     # 允许拖拽边缘自由缩放
 
         self._rows: list[TaskRow] = []
         self._rows_by_id: dict[int, TaskRow] = {}
@@ -133,11 +135,18 @@ class MainWindow(QMainWindow):
     def _on_paths(self, paths: list[Path]) -> None:
         settings = load_settings()
         out_dir = Path(settings["output_dir"]) if settings["output_dir"] else None
-        tasks, skipped, collisions = collect_paths(
+        tasks, skipped, collisions, errors = collect_paths(
             paths, output_dir=out_dir, rename_duplicates=settings["rename_duplicates"]
         )
-        existing = {(row.task.source, row.task.output_md) for row in self._rows}
-        fresh = [t for t in tasks if (t.source, t.output_md) not in existing]
+        # M4/M7：仅按“仍在排队/转换中”的行去重；失败/取消/完成的行允许重拖重新入队
+        existing = {
+            (os.path.normcase(str(row.task.source)), os.path.normcase(str(row.task.output_md)))
+            for row in self._rows if row.status in ("排队中", "转换中")
+        }
+        fresh = [
+            t for t in tasks
+            if (os.path.normcase(str(t.source)), os.path.normcase(str(t.output_md))) not in existing
+        ]
         for t in fresh:
             row = TaskRow(t, self._next_id)
             self._next_id += 1
@@ -160,6 +169,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "同名冲突",
                 "以下文件会生成同名 Markdown，后转的会覆盖先转的：\n" + lines,
+            )
+        if errors:
+            lines = "\n".join(f"{p}" for p, _reason in errors[:10])
+            more = f"\n…等共 {len(errors)} 个" if len(errors) > 10 else ""
+            QMessageBox.warning(
+                self, "部分路径无法访问",
+                f"以下 {len(errors)} 个文件/文件夹无法读取（多为无权限）：\n{lines}{more}",
             )
         if skipped:
             self.summary.setText(f"已跳过 {len(skipped)} 个不支持的文件")

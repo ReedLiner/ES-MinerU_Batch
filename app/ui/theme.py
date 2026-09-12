@@ -19,7 +19,7 @@ BAR_BG = "#e6dfd4"
 
 APP_QSS = f"""
 * {{
-    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
     font-size: 13px;
 }}
 QWidget {{

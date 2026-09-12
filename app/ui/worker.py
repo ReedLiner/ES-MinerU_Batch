@@ -8,7 +8,7 @@ from app.core import app_log
 from app.core.collect import ConvertTask
 from app.engine.client import MineruClient
 from app.engine.convert import can_batch, convert_file, convert_many
-from app.engine.errors import MineruError, friendly_message
+from app.engine.errors import MineruError, friendly_message, redact
 
 NOT_SUBMITTED_MSG = "已取消（尚未提交给 MinerU，不消耗额度）"
 
@@ -89,8 +89,17 @@ class ConvertWorker(QThread):
             nonlocal ok, fail, cancelled
             if not group:
                 return
-            rows = list(group)
+            rows_all = list(group)
             group.clear()
+            # 攒批期间被「全部停止」的任务不再提交（避免白扣额度）
+            rows = [(rid, t) for rid, t in rows_all if rid not in self._cancelled_ids]
+            for rid, _t in rows_all:
+                if rid in self._cancelled_ids:
+                    cancelled += 1
+                    self.task_cancelled.emit(rid, NOT_SUBMITTED_MSG)
+            if not rows:
+                return
+            self._abandon = False  # H4：清掉上一个任务的放弃标记，避免连锁误取消
             for row_id, _ in rows:
                 self.task_started.emit(row_id)
             app_log.get().info("批量提交 %d 个文件", len(rows))
@@ -108,7 +117,7 @@ class ConvertWorker(QThread):
                         self.task_cancelled.emit(row_id, friendly_message(exc))
                 else:
                     fail += len(rows)
-                    app_log.get().error("批量转换失败：%s", exc)
+                    app_log.get().error("批量转换失败：%s", redact(str(exc)))
                     self._finish_rows(rows, False, friendly_message(exc))
             except Exception as exc:  # 兜底
                 fail += len(rows)
@@ -119,7 +128,7 @@ class ConvertWorker(QThread):
                 for (row_id, task), (_src, _out, err) in zip(rows, results):
                     if err:
                         fail += 1
-                        app_log.get().error("批量中该件失败 %s：%s", task.source.name, err)
+                        app_log.get().error("批量中该件失败 %s：%s", task.source.name, redact(err))
                         self.task_finished.emit(row_id, False, err)
                     else:
                         ok += 1
@@ -143,6 +152,10 @@ class ConvertWorker(QThread):
                 continue
 
             flush_group()  # 先提交已攒的可批量任务，再单独处理这一个
+            if row_id in self._cancelled_ids:
+                cancelled += 1
+                self.task_cancelled.emit(row_id, NOT_SUBMITTED_MSG)
+                continue
             self._current_id = row_id
             self._abandon = False
             self.task_started.emit(row_id)
@@ -161,7 +174,7 @@ class ConvertWorker(QThread):
                     self.task_cancelled.emit(row_id, friendly_message(exc))
                 else:
                     fail += 1
-                    app_log.get().error("转换失败 %s：%s", task.source.name, exc)
+                    app_log.get().error("转换失败 %s：%s", task.source.name, redact(str(exc)))
                     self.task_finished.emit(row_id, False, friendly_message(exc))
             except Exception as exc:  # 兜底，避免线程静默崩溃
                 fail += 1

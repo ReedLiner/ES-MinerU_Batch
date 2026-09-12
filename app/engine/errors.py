@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import re
+
 KEY_INVALID = "Key 失效了，请去 https://mineru.net/apiManage 重新生成，然后在设置里更换。"
 
 _RESUME_HINT = "已保留进度，重试会跳过已完成的分段。"
+
+# 预签名 URL 的签名参数（短期凭证），一律脱敏后再进入错误消息/日志
+_REDACT_RE = re.compile(
+    r"(?i)([?&](?:expires|signature|key-pair-Id|token|sig|x-amz-signature|x-amz-credential)=)[^&\s]+"
+)
+
+
+def redact(text: str) -> str:
+    """剥掉 URL 中的签名/令牌参数，防止临时凭证泄入日志与界面。"""
+    return _REDACT_RE.sub(r"\1<REDACTED>", text or "")
 
 
 class MineruError(RuntimeError):
@@ -12,6 +24,7 @@ class MineruError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.friendly = friendly
+        self.retry_after: float | None = None  # 429 时取自 Retry-After 头（秒）
 
 
 _FRIENDLY_BY_CODE = {
@@ -25,6 +38,9 @@ _FRIENDLY_BY_CODE = {
     "-60018": "今天的转换额度用完了，明天再试或升级套餐。",
     "NETWORK": f"网络异常，请检查网络后重试。{_RESUME_HINT}",
     "TIMEOUT": f"转换超时了，请稍后重试。{_RESUME_HINT}",
+    "RATE_LIMIT": "请求太频繁（触发限流），程序会自动稍等后重试，请稍候。",
+    "HTTP_5XX": "MinerU 服务暂时不可用，程序会自动稍等后重试。",
+    "LOCAL_ERROR": "本地文件读取失败（可能无权限或被其他程序占用），请检查后重试。",
     "CANCELLED": (
         "已取消该任务。已提交给 MinerU 的部分服务端可能仍会完成转换并消耗额度；"
         "已完成的分段文件已保留，重试可续跑。"

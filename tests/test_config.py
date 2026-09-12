@@ -1,4 +1,6 @@
 import json
+import sys
+import threading
 
 import pytest
 
@@ -47,9 +49,14 @@ def test_legacy_plain_key_still_readable(cfg_path):
 
 def test_key_falls_back_to_plain_when_unavailable(cfg_path, monkeypatch):
     monkeypatch.setattr(config, "_dpapi_protect", lambda _b: None)
-    config.save_key("sk-plain")
-    assert config.load_key() == "sk-plain"
-    assert "sk-plain" in cfg_path.read_text(encoding="utf-8")
+    if sys.platform == "win32":
+        # Windows 上不允许静默明文落盘（H6）
+        with pytest.raises(RuntimeError):
+            config.save_key("sk-plain")
+        assert not cfg_path.exists()
+    else:
+        config.save_key("sk-plain")
+        assert config.load_key() == "sk-plain"
 
 
 def test_clear_key(cfg_path):
@@ -67,8 +74,50 @@ def test_clear_key_keeps_settings(cfg_path):
     assert config.load_settings()["language"] == "en"
 
 
+def test_concurrent_saves_keep_key(cfg_path):
+    """C1：两个线程并发保存设置，Key 不得丢失。"""
+    config.save_key("sk-keep-me")
+    config.save_settings({"output_dir": ""})
+
+    def writer(tag: str) -> None:
+        for i in range(60):
+            config.save_settings({"output_dir": f"{tag}-{i}"})
+
+    t1 = threading.Thread(target=writer, args=("A",))
+    t2 = threading.Thread(target=writer, args=("B",))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    raw = cfg_path.read_text(encoding="utf-8")
+    data = json.loads(raw)  # 完整可解析
+    assert config.load_key() == "sk-keep-me"
+    assert data[config.SETTINGS_FIELD]["output_dir"].startswith(("A-", "B-"))
+
+
+def test_corrupt_config_quarantined_and_restored(cfg_path):
+    """C1：损坏配置被隔离，并从备份恢复 Key。"""
+    config.save_key("sk-abc")            # 写入 + 生成 .bak
+    cfg_path.write_text("{not json", encoding="utf-8")
+    assert config.load_key() == "sk-abc"  # 从备份恢复
+    quarantined = list(cfg_path.parent.glob("config.json.corrupt-*"))
+    assert quararantine_exists(quarantined)
+
+
+def quararantine_exists(items) -> bool:
+    return len(items) >= 1
+
+
+def test_plain_key_auto_migrates(cfg_path):
+    """H6：读到明文 Key 自动升级为加密存储。"""
+    cfg_path.write_text(json.dumps({"api_key": "sk-legacy-plain"}), encoding="utf-8")
+    assert config.load_key() == "sk-legacy-plain"
+    raw = cfg_path.read_text(encoding="utf-8")
+    if config._dpapi_protect(b"x") is not None:
+        assert "sk-legacy-plain" not in raw
+        assert config.KEY_ENC_FIELD in raw
+
+
 def test_masked():
-    assert config.masked("sk-abcdefghij") == "sk-a****"
+    assert config.masked("sk-abcdefghij") == "sk-****"
     assert config.masked("abcd") == "****"
     assert config.masked("") == "****"
 

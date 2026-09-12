@@ -6,15 +6,17 @@ import requests
 
 from app.engine import client as client_mod
 from app.engine.client import MineruClient
+from app.engine.convert import convert_many
 from app.engine.errors import MineruError, friendly_message
 
 
 class FakeResp:
-    def __init__(self, status=200, body=None, content=b""):
+    def __init__(self, status=200, body=None, content=b"", headers=None):
         self.status_code = status
         self._body = body if body is not None else {}
         self.content = content
         self.text = ""
+        self.headers = headers or {}
 
     def json(self):
         if not isinstance(self._body, dict):
@@ -219,17 +221,21 @@ def test_missing_source_raises_friendly_error(tmp_path):
 
 
 def test_upload_oserror_becomes_mineru_error(tmp_path, monkeypatch):
+    """M3：本地 OSError 归类为 LOCAL_ERROR，不进入网络重试。"""
     src = tmp_path / "a.pdf"; src.write_bytes(b"x")
     s = FakeSession()
     s.post_responses = [FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})]
+    puts = {"n": 0}
 
     def _boom(*args, **kwargs):
+        puts["n"] += 1
         raise OSError("文件被占用")
 
     monkeypatch.setattr(s, "put", _boom)
     with pytest.raises(MineruError) as ei:
         _client(s).convert(src, tmp_path / "o.md")
-    assert ei.value.code == "NETWORK"
+    assert ei.value.code == "LOCAL_ERROR"
+    assert puts["n"] == 1  # 没有重试
 
 
 def test_non_https_upload_url_rejected(tmp_path):
@@ -463,6 +469,158 @@ def test_download_write_failure_becomes_mineru_error(tmp_path):
     ]
     with pytest.raises(MineruError, match="写入临时文件失败"):
         _client(s).convert(src, tmp_path / "o.md")
+
+
+def test_rate_limit_backoff_with_retry_after(tmp_path, monkeypatch):
+    """C2/TC8：429 按 Retry-After 退避重试后成功。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda s: sleeps.append(s))
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    s = FakeSession()
+    calls = {"n": 0}
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResp(status=429, headers={"Retry-After": "2"})
+        s.posts.append({"url": url, "json": json, "headers": headers})
+        return FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})
+
+    monkeypatch.setattr(s, "post", post)
+    s.get_responses = [
+        FakeResp(body={"data": {"extract_result": [{"state": "done", "full_zip_url": "https://z/1"}]}}),
+        FakeResp(content=_make_zip(tmp_path / "z", {"full.md": b"OK"})),
+    ]
+    _client(s).convert(src, tmp_path / "o.md")
+    assert calls["n"] == 2
+    assert sleeps and sleeps[0] >= 2  # 首次退避尊重 Retry-After
+
+
+def test_batch_rate_limit_no_degrade(tmp_path, monkeypatch):
+    """C2/TC9：批量遇 429 整批退避重试，不降级为逐个提交。"""
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda _s: None)
+    jobs = []
+    for i in range(3):
+        f = tmp_path / f"{i}.docx"; f.write_bytes(b"x")
+        jobs.append((f, tmp_path / f"{i}.md"))
+    s = FakeSession()
+    calls = {"n": 0}
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResp(status=429, headers={"Retry-After": "1"})
+        return FakeResp(body={"code": 0, "data": {
+            "batch_id": "b", "file_urls": [f"https://up/{i}" for i in range(3)]}})
+
+    monkeypatch.setattr(s, "post", post)
+    s.get_responses = [
+        FakeResp(body={"data": {"extract_result": [
+            {"state": "done", "full_zip_url": f"https://z/{i}", "data_id": f"f{i + 1}"}
+            for i in range(3)]}}),
+    ] + [FakeResp(content=_make_zip(tmp_path / f"z{i}", {"full.md": b"x"})) for i in range(3)]
+    client = _client(s)
+    results = convert_many(client, jobs)
+    assert calls["n"] == 2                     # 1 次 429 + 1 次成功，而非 1+3
+    assert [e for _, _, e in results] == [None, None, None]
+
+
+def test_upload_5xx_retried(tmp_path, monkeypatch):
+    """C2/TC10：上传 503 有退避重试。"""
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda _s: None)
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})]
+    s.get_responses = [
+        FakeResp(body={"data": {"extract_result": [{"state": "done", "full_zip_url": "https://z/1"}]}}),
+        FakeResp(content=_make_zip(tmp_path / "z", {"full.md": b"OK"})),
+    ]
+    puts = {"n": 0}
+
+    def put(url, data=None, timeout=None):
+        puts["n"] += 1
+        if puts["n"] <= 2:
+            return FakeResp(status=503)
+        s.puts.append((url, b"".join(data)))
+        return FakeResp()
+
+    monkeypatch.setattr(s, "put", put)
+    _client(s).convert(src, tmp_path / "o.md")
+    assert puts["n"] == 3
+    assert (tmp_path / "o.md").exists()
+
+
+def test_poll_survives_transient_network_errors(tmp_path, monkeypatch):
+    """H1/TC7：轮询期两次瞬断后恢复，任务照常完成。"""
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda _s: None)
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})]
+    gets = {"n": 0}
+
+    def flaky_get(url, **kwargs):
+        gets["n"] += 1
+        if gets["n"] <= 2:
+            raise requests.ConnectionError("瞬断")
+        if url.endswith("/b"):
+            s.gets.append(url)
+            return FakeResp(body={"data": {"extract_result": [{"state": "done", "full_zip_url": "https://z/1"}]}})
+        s.gets.append(url)
+        return FakeResp(content=_make_zip(tmp_path / "z", {"full.md": b"OK"}))
+
+    monkeypatch.setattr(s, "get", flaky_get)
+    _client(s).convert(src, tmp_path / "o.md")
+    assert (tmp_path / "o.md").read_bytes() == b"OK"
+
+
+def test_presigned_url_redacted_in_errors(tmp_path, monkeypatch):
+    """H2：预签名 URL 的 Signature 不得进入错误消息。"""
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda _s: None)
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})]
+
+    def bad_put(url, data=None, timeout=None):
+        raise requests.ConnectionError(
+            "PUT failed: https://up/1?Expires=1760000000&Signature=REALSIGabc123&Key-Pair-Id=APK"
+
+        )
+
+    monkeypatch.setattr(s, "put", bad_put)
+    with pytest.raises(MineruError) as ei:
+        _client(s).convert(src, tmp_path / "o.md")
+    assert "REALSIG" not in str(ei.value)
+    assert "<REDACTED>" in str(ei.value)
+
+
+def test_local_permission_error_not_retried(tmp_path, monkeypatch):
+    """M3：本地无权限错误不进入网络重试。"""
+    monkeypatch.setattr(client_mod, "_SLEEP", lambda _s: None)
+    src = tmp_path / "a.pdf"; src.write_bytes(b"x")
+    s = FakeSession()
+    s.post_responses = [FakeResp(body={"code": 0, "data": {"batch_id": "b", "file_urls": ["https://up/1"]}})]
+    puts = {"n": 0}
+
+    def deny(url, data=None, timeout=None):
+        puts["n"] += 1
+        raise PermissionError("拒绝访问")
+
+    monkeypatch.setattr(s, "put", deny)
+    with pytest.raises(MineruError) as ei:
+        _client(s).convert(src, tmp_path / "o.md")
+    assert ei.value.code == "LOCAL_ERROR"
+    assert puts["n"] == 1  # 没有重试
+
+
+def test_extract_atomic_no_tmp_left(tmp_path):
+    """M1：结果 md 原子落盘，不留 .tmp 残骸。"""
+    zip_bytes = _make_zip(tmp_path / "z", {"full.md": b"# hi"})
+    zp = tmp_path / "r.zip"
+    zp.write_bytes(zip_bytes)
+    out = tmp_path / "r.md"
+    client_mod._extract_full_md(zp, out)
+    assert out.read_bytes() == b"# hi"
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_html_file_uses_mineru_html_model(tmp_path):

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pypdf import PdfWriter
 
+from app.engine import convert as convert_mod
 from app.engine.convert import (
     can_batch,
     chunk_size_for,
@@ -158,12 +159,26 @@ def test_chunk_size_for():
     assert chunk_size_for(1200) == 100
 
 
-def test_chunk_failure_retries_once(tmp_path):
+def test_chunk_failure_retries_once(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(convert_mod, "_SLEEP", lambda s: sleeps.append(s))
     src = _make_pdf(tmp_path / "r.pdf", 201)
     client = FlakyClient(fail_times=1)
     convert_file(src, tmp_path / "r.md", client)
-    # 第 1 段失败后自动重试一次，再继续第 2 段
+    # 第 1 段失败后自动重试一次（先退避 ≥2s），再继续第 2 段
     assert [c["page_ranges"] for c in client.calls] == ["1-200", "1-200", "201-201"]
+    assert sleeps and sleeps[0] >= 2
+
+
+def test_page_count_cached(tmp_path):
+    """M8：同一 PDF 多次询问页数只解析一次。"""
+    src = _make_pdf(tmp_path / "c.pdf", 10)
+    convert_mod._page_count_cached.cache_clear()
+    assert count_pdf_pages(src) == 10
+    assert can_batch(src) is True
+    assert count_pdf_pages(src) == 10
+    info = convert_mod._page_count_cached.cache_info()
+    assert info.misses == 1 and info.hits >= 2
 
 
 def test_chunk_failure_gives_up(tmp_path):

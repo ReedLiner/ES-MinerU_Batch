@@ -205,6 +205,14 @@ class SettingsDialog(QDialog):
         self.key_changed.emit()
 
     def _clear(self) -> None:
+        ret = QMessageBox.question(
+            self, "删除 Key",
+            "确定删除已保存的 API Key 吗？\n（转换设置会保留，随时可以重新填写）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
         clear_key()
         self._refresh()
         self.key_changed.emit()

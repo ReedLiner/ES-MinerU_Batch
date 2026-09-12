@@ -1,85 +1,44 @@
 # ES MinerU Batch
 
-Drag PDF / Word / PPT / Excel / image / HTML files into the window and get clean Markdown back — powered by the [MinerU](https://mineru.net) precision parsing API.
+把 PDF / Word / PPT / Excel / 图片 / HTML 拖进窗口，自动转成 Markdown（基于 MinerU 精准解析 API）。
 
-[中文说明](README.zh-CN.md)
+## 使用者（拿到 exe 的人）
 
-## Features
+1. 双击 `ES MinerU Batch.exe`（无需安装任何东西）。窗口边缘可自由拖拽缩放；重复启动会提示"已在运行"。
+2. 首次打开会要求填 Key：去 https://mineru.net/apiManage 登录并生成 API Key，粘贴保存。
+3. 拖入文件或文件夹：
+   - 单个文件 → 在同目录生成同名 `.md`。
+   - 文件夹 → 在源文件夹旁边自动新建「文件夹名（MinerU）」文件夹（如 `Downloads\香港法律` → `Downloads\香港法律（MinerU）`），在里面生成整批 `.md`（子文件夹结构保留，不支持的文件自动跳过）。
+4. 超过 200 页的 PDF 会自动分段转换后合并成一个 `.md`；中途失败重试会从断点续跑。
+5. 「排队中」的任务可点「取消」（尚未提交给 MinerU，不消耗额度）；「转换中」的任务可点「放弃」——注意：已提交的部分 MinerU 服务端可能仍会完成转换并消耗额度，已完成的分段会保留、重试可续跑。
+   - 想一次性收手，点右下角「**全部停止**」：中断当前转换，其余排队任务一律不再提交。
+   - 文件名过长时 MinerU 会拒绝（限制 128 字符），此时程序会自动改为逐个转换，只让该文件失败并提示"请改短文件名"。
+6. 转换结果随手可达：任务行右侧「打开」按钮、双击任务行可打开输出文件夹；全部完成后会弹系统通知，并可按设置自动打开输出文件夹。
+7. 除了拖拽，也可以用「选择文件… / 选择文件夹…」按钮；还支持命令行：`ES MinerU Batch.exe a.pdf D:\资料`。
+8. 在「⚙ 设置」里可以调整：
+   - **启用 OCR**：扫描版 PDF / 图片文字识别需要勾选（默认关闭）。
+   - **文档语言**：中英文（默认）/ 英文 / 繁体中文 / 日文 / 韩文 / 拉丁语系 / 西里尔语系 / 阿拉伯语系。
+   - **输出目录**：留空则输出到源文件旁（文件夹 → 同级「同名（MinerU）」目录）；也可指定统一的输出目录。
+   - **同名输出自动加序号**：开启后生成 `a.md`、`a(1).md`，不再互相覆盖。
+   - **批量提速**：一次最多 50 个文件一起提交（默认开启），速度更快；超过 200 页的 PDF 与 HTML 仍逐个转换。
+   - **全部完成后自动打开输出文件夹**。
+   - **打开日志**：日志在 `%LOCALAPPDATA%\ES MinerU Batch\app.log`，只记录任务与错误摘要；不记录 API Key，结果链接中的签名参数也会自动脱敏后才会写入。
+   - 配置保存在 `%APPDATA%\MinerUBatch\config.json`（Key 经 Windows 加密存储，仅本机当前用户可解密）。
 
-- **Drag & drop** files or whole folders. Sub-folder structure is preserved; unsupported files are skipped automatically.
-- **Batch conversion**: up to 50 files per submission (toggleable). PDFs over 200 pages and HTML files are still converted one by one.
-- **Large PDF support**: PDFs longer than 200 pages are split into segments, converted, then merged into a single `.md`. A failed run resumes from the last completed segment.
-- **OCR** toggle for scanned PDFs and images (off by default).
-- **8 document languages**: Chinese (simplified) / English / Traditional Chinese / Japanese / Korean / Latin / Cyrillic / Arabic.
-- **Flexible output**: next to the source file by default; for a folder, a sibling `FolderName (MinerU)` folder is created; or pick one fixed output directory.
-- **Duplicate handling**: optionally auto-number colliding outputs (`a.md`, `a(1).md`) instead of overwriting.
-- **Task control**: cancel a *Queued* task before it is submitted (no quota consumed); abandon a *Converting* task (already submitted segments may still complete on the server side and consume quota). **Stop all** (bottom right) halts the current conversion and stops submitting every remaining queued task.
-- **Long file names**: MinerU rejects names over 128 characters. The app then falls back to one-by-one conversion so only that file fails, with a "please shorten the file name" hint.
-- **Quick access**: per-row **Open** button, double-click a row to open its output folder, desktop notification when everything finishes, and an optional auto-open of the output folder.
-- **Command line**: `ES MinerU Batch.exe a.pdf D:\Docs`.
-- **Privacy**: the API key is stored per-user and encrypted with Windows DPAPI; it is never written to the log.
+注意：每个人需要自己的 Key；每天有用量额度；单个文件不能超过 200MB。
 
-## Supported input formats
-
-`.pdf` `.doc` `.docx` `.ppt` `.pptx` `.xls` `.xlsx` `.png` `.jpg` `.jpeg` `.bmp` `.webp` `.html` `.htm`
-
-## Requirements
-
-- Windows 10 / 11 (Qt desktop app; the key is protected with Windows DPAPI)
-- Python 3.9+ (only needed when running from source)
-- Your own MinerU API key — generate one at <https://mineru.net/apiManage>
-
-Limits imposed by the MinerU service: a single file must be under 200 MB, and each account has a daily quota.
-
-## For users (no Python needed)
-
-1. Download `ES MinerU Batch.exe` from **Releases** and double-click it.
-2. On first launch, paste your API key and save it.
-3. Drop files or folders into the window, or use **Select files… / Select folder…**.
-4. Open **⚙ Settings** to tune OCR, language, output directory, batch size, duplicate naming and auto-open.
-
-Logs are written to `%LOCALAPPDATA%\ES MinerU Batch\app.log` (task and error summaries only).
-
-## For developers
+## 开发者
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements-dev.txt
-python -m pytest tests/         # run tests
-python -m app.main              # launch the app
+python -m pytest tests/         # 运行测试
+python -m app.main              # 启动程序
 ```
 
-On Windows you can also just double-click `启动 ES MinerU Batch.bat`.
+打包：`packaging\build.bat`（或手动跑其中的 pyinstaller 命令），产物在 `dist\ES MinerU Batch.exe`。
 
-Build a standalone exe:
+## 设计文档
 
-```bash
-packaging\build.bat             # output: dist\ES MinerU Batch.exe
-```
-
-## Project layout
-
-```
-app/
-  core/      config (key storage, settings), collect (path → task mapping), app_log
-  engine/    MinerU API client, conversion pipeline, error types
-  ui/        Qt main window, settings dialog, task widgets, theme, worker threads
-tests/       pytest suite
-packaging/   PyInstaller spec, build script, Windows version info
-docs/        UI theme proposals
-```
-
-Design notes: `docs/design/theme-proposals.html` (UI theme proposals).
-
-## Security notes
-
-- The API key lives in `%APPDATA%\MinerUBatch\config.json` and is encrypted with `CryptProtectData` (current Windows user only). If DPAPI is unavailable it falls back to plaintext.
-- Only a masked preview (`abcd****`) is shown in the UI, and the key is never logged.
-- Nothing is uploaded anywhere except to the MinerU API you configure.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-This is an unofficial client for the MinerU API. "MinerU" is a trademark of its respective owner; this project is not affiliated with or endorsed by it.
+见 `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`。

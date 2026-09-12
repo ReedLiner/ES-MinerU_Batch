@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -15,6 +17,9 @@ from app.engine.errors import MineruError, friendly_message
 
 CHUNK_SIZE = 200  # MinerU 单次任务页数上限
 _RETRY_CODES = ("NETWORK", "TIMEOUT", "-60006")  # 分段失败后值得重试的错误
+CHUNK_RETRY_WAIT = 2.0  # 分段重试前先等一会（M2：避免立即提交全新任务）
+
+_SLEEP = time.sleep  # 测试可替换
 
 
 def can_batch(source: Path) -> bool:
@@ -52,12 +57,24 @@ def chunk_size_for(pages: int) -> int:
 
 
 def count_pdf_pages(path: Path) -> int:
+    """统计 PDF 页数（按 路径+mtime+大小 缓存，避免同一文件重复解析，M8）。"""
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise MineruError(
+            f"无法读取 PDF 页数（文件不存在或无法访问）：{exc}",
+        ) from exc
+    return _page_count_cached(str(path), st.st_mtime_ns, st.st_size)
+
+
+@lru_cache(maxsize=512)
+def _page_count_cached(path_str: str, _mtime: int, _size: int) -> int:
     try:
         from pypdf import PdfReader
     except ImportError as exc:
         raise MineruError("缺少 pypdf 依赖，无法统计 PDF 页数") from exc
     try:
-        return len(PdfReader(str(path)).pages)
+        return len(PdfReader(path_str).pages)
     except Exception as exc:
         raise MineruError(f"无法读取 PDF 页数（文件可能损坏或加密）：{exc}") from exc
 
@@ -142,6 +159,12 @@ def convert_file(
     chunks = plan_chunks(pages, chunk_size_for(pages))
     parts = [out_md.parent / f"{out_md.stem}.part{i}.md" for i in range(1, len(chunks) + 1)]
     total = len(chunks)
+    # H3 加固：清理上次崩溃可能遗留的孤立分段临时文件
+    for orphan in out_md.parent.glob(f"{out_md.stem}.part*.md.tmp"):
+        try:
+            orphan.unlink()
+        except OSError:
+            pass
     for i, ((s, e), part) in enumerate(zip(chunks, parts), start=1):
         if cancel_check and cancel_check():
             raise MineruError("已取消该任务", code="CANCELLED")
@@ -155,6 +178,7 @@ def convert_file(
             if exc.code not in _RETRY_CODES:
                 raise
             _report(progress, f"{source.name}：第 {i}/{total} 段失败，重试一次…")
+            _SLEEP(CHUNK_RETRY_WAIT)  # M2：退避后再提交，避免立即重发
             client.convert(source, part, page_ranges=f"{s}-{e}", cancel_check=cancel_check)
 
     _merge(parts, out_md)

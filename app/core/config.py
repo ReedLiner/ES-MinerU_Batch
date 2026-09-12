@@ -7,8 +7,20 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import shutil
 import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
+
+from app.core import app_log
+
+try:
+    import msvcrt
+except ImportError:  # 非 Windows（开发环境）
+    msvcrt = None
 
 _APPDATA = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
 CONFIG_PATH = _APPDATA / "MinerUBatch" / "config.json"
@@ -16,6 +28,57 @@ CONFIG_PATH = _APPDATA / "MinerUBatch" / "config.json"
 KEY_FIELD = "api_key"
 KEY_ENC_FIELD = "api_key_enc"  # Windows DPAPI 加密后的 Key（Base64）
 SETTINGS_FIELD = "settings"
+
+_LOCK = threading.RLock()  # 进程内互斥（可重入，允许 load 迁移内部调 save）
+
+
+def _bak_path() -> Path:
+    return CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+
+
+def _file_lock(timeout: float = 5.0):
+    """跨进程锁：对 config.json.lock 首字节加 msvcrt 锁；拿不到也放行（尽力而为）。"""
+    if msvcrt is None or sys.platform != "win32":
+        return None
+    lock_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    except OSError:
+        return None
+    deadline = time.time() + timeout
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return fd
+        except OSError:
+            if time.time() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.05)
+
+
+def _file_unlock(fd) -> None:
+    if fd is None:
+        return
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _config_lock():
+    """读-改-写临界区：进程内 RLock + 跨进程文件锁。"""
+    with _LOCK:
+        fd = _file_lock()
+        try:
+            yield
+        finally:
+            _file_unlock(fd)
 
 
 class _DATA_BLOB(ctypes.Structure):
@@ -90,27 +153,69 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _quarantine_corrupt() -> None:
+    """损坏的配置改名保留现场，供排障。"""
+    backup_name = f"{CONFIG_PATH.name}.corrupt-{int(time.time())}"
+    try:
+        CONFIG_PATH.rename(CONFIG_PATH.with_name(backup_name))
+        app_log.get().error("配置文件损坏，已隔离为 %s", backup_name)
+    except OSError:
+        pass
+
+
+def _restore_from_bak() -> dict:
+    bak = _bak_path()
+    if not bak.exists():
+        return {}
+    try:
+        data = json.loads(bak.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _read_config() -> dict:
     if not CONFIG_PATH.exists():
         return {}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        _quarantine_corrupt()
+        restored = _restore_from_bak()
+        if restored:
+            app_log.get().error("配置已从备份 %s 恢复", _bak_path().name)
+        return restored
+    except OSError:
         return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _write_config(data: dict) -> None:
+    """原子写：同目录临时文件 + fsync + os.replace；成功后滚动备份。"""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(dir=str(CONFIG_PATH.parent), prefix=".config-", suffix=".tmp")
     try:
-        os.chmod(CONFIG_PATH, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        fd = -1  # fdopen 的 with 已关闭句柄，避免二次 close 误伤复用的句柄号
+        os.replace(tmp, CONFIG_PATH)  # Windows 同盘 replace 原子
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        Path(tmp).unlink(missing_ok=True)  # replace 成功时不存在，防御残留
+    try:
+        shutil.copyfile(CONFIG_PATH, _bak_path())
     except OSError:
-        pass  # Windows 下 chmod 语义不同，忽略
+        pass
 
 
 def load_key() -> str | None:
-    """读取已保存的 Key：优先读加密字段，兼容旧的明文配置。"""
+    """读取已保存的 Key：优先读加密字段，兼容旧的明文配置（读到即自动迁移为加密）。"""
     data = _read_config()
     enc = data.get(KEY_ENC_FIELD)
     if isinstance(enc, str) and enc:
@@ -121,6 +226,12 @@ def load_key() -> str | None:
         if raw:
             return raw.decode("utf-8", errors="ignore") or None
     key = (data.get(KEY_FIELD) or "").strip()
+    if key and sys.platform == "win32":
+        # 明文迁移：读到明文立即重存为 DPAPI 加密（H6）
+        try:
+            save_key(key)
+        except (RuntimeError, OSError):
+            pass  # 迁移失败不阻断读取
     return key or None
 
 
@@ -128,27 +239,32 @@ def save_key(key: str) -> None:
     key = (key or "").strip()
     if not key:
         raise ValueError("Key 不能为空")
-    data = _read_config()
-    protected = _dpapi_protect(key.encode("utf-8"))
-    if protected is not None:
-        data.pop(KEY_FIELD, None)
-        data[KEY_ENC_FIELD] = base64.b64encode(protected).decode("ascii")
-    else:
-        data[KEY_FIELD] = key  # 加密不可用时退回明文
-    _write_config(data)
+    with _config_lock():
+        data = _read_config()
+        protected = _dpapi_protect(key.encode("utf-8"))
+        if protected is not None:
+            data.pop(KEY_FIELD, None)
+            data[KEY_ENC_FIELD] = base64.b64encode(protected).decode("ascii")
+        elif sys.platform == "win32":
+            # Windows 上不允许静默明文落盘（H6）
+            raise RuntimeError("本机加密不可用（DPAPI 调用失败），Key 未保存")
+        else:
+            data[KEY_FIELD] = key  # 非 Windows 开发环境保留明文回退
+        _write_config(data)
 
 
 def clear_key() -> None:
     """删除已保存的 Key，但保留转换设置等其它配置。"""
-    data = _read_config()
-    if not data:
-        return
-    data.pop(KEY_FIELD, None)
-    data.pop(KEY_ENC_FIELD, None)
-    if data:
-        _write_config(data)
-    else:
-        CONFIG_PATH.unlink(missing_ok=True)
+    with _config_lock():
+        data = _read_config()
+        if not data:
+            return
+        data.pop(KEY_FIELD, None)
+        data.pop(KEY_ENC_FIELD, None)
+        if data:
+            _write_config(data)
+        else:
+            CONFIG_PATH.unlink(missing_ok=True)
 
 
 def load_settings() -> dict:
@@ -193,20 +309,22 @@ def save_settings(settings: dict) -> None:
     if not isinstance(auto_open, bool):
         raise ValueError("自动打开设置必须为布尔值")
 
-    data = _read_config()
-    data[SETTINGS_FIELD] = {
-        "is_ocr": is_ocr,
-        "language": language,
-        "output_dir": output_dir,
-        "rename_duplicates": rename_duplicates,
-        "batch_size": batch_size,
-        "auto_open": auto_open,
-    }
-    _write_config(data)
+    with _config_lock():
+        data = _read_config()
+        data[SETTINGS_FIELD] = {
+            "is_ocr": is_ocr,
+            "language": language,
+            "output_dir": output_dir,
+            "rename_duplicates": rename_duplicates,
+            "batch_size": batch_size,
+            "auto_open": auto_open,
+        }
+        _write_config(data)
 
 
 def masked(key: str | None) -> str:
+    """掩码不露出 sk- 前缀之外的任何真实字符（L2）。"""
     key = (key or "").strip()
-    if len(key) <= 4:
-        return "****"
-    return key[:4] + "****"
+    if key.startswith("sk-"):
+        return "sk-****"
+    return "****"
