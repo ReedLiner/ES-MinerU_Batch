@@ -1,10 +1,12 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # ES MinerU Batch
 
 把 PDF / Word / PPT / Excel / 图片 / HTML 拖进窗口，自动转成 Markdown（基于 MinerU 精准解析 API）。
 
 ## 使用者（拿到 exe 的人）
 
-1. 双击 `ES MinerU Batch.exe`（无需安装任何东西）。
+1. 双击 `ES MinerU Batch.exe`（无需安装任何东西）。窗口边缘可自由拖拽缩放；重复启动会提示"已在运行"。
 2. 首次打开会要求填 Key：去 https://mineru.net/apiManage 登录并生成 API Key，粘贴保存。
 3. 拖入文件或文件夹：
    - 单个文件 → 在同目录生成同名 `.md`。
@@ -22,7 +24,8 @@
    - **同名输出自动加序号**：开启后生成 `a.md`、`a(1).md`，不再互相覆盖。
    - **批量提速**：一次最多 50 个文件一起提交（默认开启），速度更快；超过 200 页的 PDF 与 HTML 仍逐个转换。
    - **全部完成后自动打开输出文件夹**。
-   - **打开日志**：日志在 `%LOCALAPPDATA%\ES MinerU Batch\app.log`，只记录任务与错误摘要，不记录 API Key。
+   - **打开日志**：日志在 `%LOCALAPPDATA%\ES MinerU Batch\app.log`，只记录任务与错误摘要；不记录 API Key，结果链接中的签名参数也会自动脱敏后才会写入。
+   - 配置保存在 `%APPDATA%\MinerUBatch\config.json`（Key 经 Windows 加密存储，仅本机当前用户可解密）。
 
 注意：每个人需要自己的 Key；每天有用量额度；单个文件不能超过 200MB。
 
@@ -40,4 +43,4 @@ python -m app.main              # 启动程序
 
 ## 设计文档
 
-UI 主题方案见 `docs/design/theme-proposals.html`。
+见 `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`。
