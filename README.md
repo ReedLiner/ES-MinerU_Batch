@@ -10,7 +10,7 @@ Drag & drop PDF / Word / PPT / Excel / images / HTML into the window and get Mar
 2. On first launch you'll be asked for an API Key: sign in at https://mineru.net/apiManage, generate a key, paste it in and save.
 3. Drag in files or folders:
    - Single file → a same-named `.md` is generated next to it.
-   - Folder → a sibling folder named `FolderName（MinerU）` is created automatically (e.g. `Downloads\香港法律` → `Downloads\香港法律（MinerU）`), containing the `.md` for the whole batch (subfolder structure preserved; unsupported files are skipped automatically).
+   - Folder → a sibling folder named `FolderName（MinerU）` is created automatically (e.g. `Downloads\BVI Laws` → `Downloads\BVI Laws（MinerU）`), containing the `.md` for the whole batch (subfolder structure preserved; unsupported files are skipped automatically).
 4. PDFs over 200 pages are converted in segments automatically and merged into a single `.md`; retries resume from where they left off.
 5. Tasks that are **Queued** can be cancelled (not yet submitted to MinerU, no quota used); tasks **Converting** can be abandoned — note: parts already submitted may still finish on MinerU's servers and consume quota. Completed segments are kept and retries will resume.
    - To stop everything at once, click **Stop All** at the bottom right: the current conversion is interrupted and no queued tasks will be submitted anymore.
