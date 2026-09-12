@@ -1,44 +1,46 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # ES MinerU Batch
 
-把 PDF / Word / PPT / Excel / 图片 / HTML 拖进窗口，自动转成 Markdown（基于 MinerU 精准解析 API）。
+Drag & drop PDF / Word / PPT / Excel / images / HTML into the window and get Markdown automatically — powered by the MinerU parsing API.
 
-## 使用者（拿到 exe 的人）
+## For Users (the `.exe`)
 
-1. 双击 `ES MinerU Batch.exe`（无需安装任何东西）。窗口边缘可自由拖拽缩放；重复启动会提示"已在运行"。
-2. 首次打开会要求填 Key：去 https://mineru.net/apiManage 登录并生成 API Key，粘贴保存。
-3. 拖入文件或文件夹：
-   - 单个文件 → 在同目录生成同名 `.md`。
-   - 文件夹 → 在源文件夹旁边自动新建「文件夹名（MinerU）」文件夹（如 `Downloads\香港法律` → `Downloads\香港法律（MinerU）`），在里面生成整批 `.md`（子文件夹结构保留，不支持的文件自动跳过）。
-4. 超过 200 页的 PDF 会自动分段转换后合并成一个 `.md`；中途失败重试会从断点续跑。
-5. 「排队中」的任务可点「取消」（尚未提交给 MinerU，不消耗额度）；「转换中」的任务可点「放弃」——注意：已提交的部分 MinerU 服务端可能仍会完成转换并消耗额度，已完成的分段会保留、重试可续跑。
-   - 想一次性收手，点右下角「**全部停止**」：中断当前转换，其余排队任务一律不再提交。
-   - 文件名过长时 MinerU 会拒绝（限制 128 字符），此时程序会自动改为逐个转换，只让该文件失败并提示"请改短文件名"。
-6. 转换结果随手可达：任务行右侧「打开」按钮、双击任务行可打开输出文件夹；全部完成后会弹系统通知，并可按设置自动打开输出文件夹。
-7. 除了拖拽，也可以用「选择文件… / 选择文件夹…」按钮；还支持命令行：`ES MinerU Batch.exe a.pdf D:\资料`。
-8. 在「⚙ 设置」里可以调整：
-   - **启用 OCR**：扫描版 PDF / 图片文字识别需要勾选（默认关闭）。
-   - **文档语言**：中英文（默认）/ 英文 / 繁体中文 / 日文 / 韩文 / 拉丁语系 / 西里尔语系 / 阿拉伯语系。
-   - **输出目录**：留空则输出到源文件旁（文件夹 → 同级「同名（MinerU）」目录）；也可指定统一的输出目录。
-   - **同名输出自动加序号**：开启后生成 `a.md`、`a(1).md`，不再互相覆盖。
-   - **批量提速**：一次最多 50 个文件一起提交（默认开启），速度更快；超过 200 页的 PDF 与 HTML 仍逐个转换。
-   - **全部完成后自动打开输出文件夹**。
-   - **打开日志**：日志在 `%LOCALAPPDATA%\ES MinerU Batch\app.log`，只记录任务与错误摘要；不记录 API Key，结果链接中的签名参数也会自动脱敏后才会写入。
-   - 配置保存在 `%APPDATA%\MinerUBatch\config.json`（Key 经 Windows 加密存储，仅本机当前用户可解密）。
+1. Double-click `ES MinerU Batch.exe` — nothing to install. The window edges can be dragged to resize; launching a second instance shows an "already running" notice.
+2. On first launch you'll be asked for an API Key: sign in at https://mineru.net/apiManage, generate a key, paste it in and save.
+3. Drag in files or folders:
+   - Single file → a same-named `.md` is generated next to it.
+   - Folder → a sibling folder named `FolderName（MinerU）` is created automatically (e.g. `Downloads\香港法律` → `Downloads\香港法律（MinerU）`), containing the `.md` for the whole batch (subfolder structure preserved; unsupported files are skipped automatically).
+4. PDFs over 200 pages are converted in segments automatically and merged into a single `.md`; retries resume from where they left off.
+5. Tasks that are **Queued** can be cancelled (not yet submitted to MinerU, no quota used); tasks **Converting** can be abandoned — note: parts already submitted may still finish on MinerU's servers and consume quota. Completed segments are kept and retries will resume.
+   - To stop everything at once, click **Stop All** at the bottom right: the current conversion is interrupted and no queued tasks will be submitted anymore.
+   - Overly long filenames are rejected by MinerU (128-character limit); the program then automatically switches to one-by-one conversion so only that file fails, with a "please shorten the filename" hint.
+6. Results are always within reach: the "Open" button on each task row, double-click a task row to open its output folder; a system notification pops up when everything finishes, and the output folder can be opened automatically per settings.
+7. Besides drag & drop, you can use the "Select Files… / Select Folder…" buttons; command line is also supported: `ES MinerU Batch.exe a.pdf D:\资料`.
+8. In "⚙ Settings" you can adjust:
+   - **Enable OCR**: required for scanned PDFs / images with text (off by default).
+   - **Document language**: Chinese & English (default) / English / Traditional Chinese / Japanese / Korean / Latin / Cyrillic / Arabic.
+   - **Output directory**: leave empty to output next to the source (folders → a sibling `FolderName（MinerU）` directory), or set a unified output directory.
+   - **Auto-number duplicate outputs**: when enabled, generates `a.md`, `a(1).md` instead of overwriting.
+   - **Batch acceleration**: up to 50 files submitted together (on by default) for faster throughput; PDFs over 200 pages and HTML files are still converted one by one.
+   - **Auto-open output folder when everything finishes**.
+   - **Open log**: logs live at `%LOCALAPPDATA%\ES MinerU Batch\app.log`, recording only task and error summaries; the API Key is never logged, and signature parameters in result links are sanitized before being written.
+   - Configuration is stored at `%APPDATA%\MinerUBatch\config.json` (the Key is encrypted with Windows DPAPI, decryptable only by the current user on this machine).
 
-注意：每个人需要自己的 Key；每天有用量额度；单个文件不能超过 200MB。
+Note: everyone needs their own Key; daily usage quotas apply; a single file must not exceed 200 MB.
 
-## 开发者
+## For Developers
 
 ```bash
 python -m venv .venv
 source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements-dev.txt
-python -m pytest tests/         # 运行测试
-python -m app.main              # 启动程序
+python -m pytest tests/         # run tests
+python -m app.main              # launch the app
 ```
 
-打包：`packaging\build.bat`（或手动跑其中的 pyinstaller 命令），产物在 `dist\ES MinerU Batch.exe`。
+Packaging: run `packaging\build.bat` (or the pyinstaller commands inside it); the artifact lands at `dist\ES MinerU Batch.exe`.
 
-## 设计文档
+## Design Document
 
-见 `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`。
+See `docs/superpowers/specs/2026-09-08-mineru-batch-design.md`.
